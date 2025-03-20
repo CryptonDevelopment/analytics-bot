@@ -1,0 +1,90 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: ["main", "dev"]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Check paths and set strategy
+        id: get-changed-path
+        run: |
+          FILES_CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+          if echo "$FILES_CHANGED" | grep -q "requirements.txt"; then
+            echo "strategy-type=container-rebuild" >> $GITHUB_ENV 
+          else
+            echo "strategy-type=file-update" >> $GITHUB_ENV
+          fi
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@master
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - if: env.strategy-type == 'file-update'
+        name: Update backend files in running container
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          file: ./Dockerfile-update
+
+      - if: env.strategy-type == 'container-rebuild'
+        name: Rebuild and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          file: ./Dockerfile
+
+      - name: Set Webhook Variables for Main Branch
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "WEBHOOK=${{ secrets.WEBHOOK_PROD }}" >> $GITHUB_ENV
+          echo "WEBHOOK_CONSUMER=${{ secrets.WEBHOOK_CONSUMER_PROD }}" >> $GITHUB_ENV
+
+      - name: Set Webhook Variables for Dev Branch
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          echo "WEBHOOK=${{ secrets.WEBHOOK_DEV }}" >> $GITHUB_ENV
+          echo "WEBHOOK_CONSUMER=${{ secrets.WEBHOOK_CONSUMER_DEV }}" >> $GITHUB_ENV
+
+      - name: Webhook
+        env:
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+        run: |
+          curl -k -X POST -H "Content-Type: application/json" -H "X-Webhook-Signature: ${{ secrets.WEBHOOK_SECRET }}" -d '{"text": "Docker image build complete: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tags }}", "repository": "${{ github.repository }}", "ref": "${{ github.ref }}", "commit": "${{ github.sha }}"}' $WEBHOOK
+
+      - name: Webhook Consumer
+        env:
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+        run: |
+          curl -k -X POST -H "Content-Type: application/json" -H "X-Webhook-Signature: ${{ secrets.WEBHOOK_SECRET }}" -d '{"text": "Docker image build complete: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tags }}", "repository": "${{ github.repository }}", "ref": "${{ github.ref }}", "commit": "${{ github.sha }}"}' $WEBHOOK_CONSUMER
